@@ -1,89 +1,56 @@
-# Eventeaseplus: full website (frontend + API + database)
+# Eventeaseplus: secured working copy
 
-Node 20 + Express API on PostgreSQL that also serves the website (`public/`: `index.html`, `app.css`, `app.js`, no build step). One process, one URL. It implements every feature in the website demo: events and filters, seat holds, guest and customer checkout, QR tickets with signed codes, cancellation and refunds, transfer and resale, promo/referral/loyalty, smart queue, notifications, organiser dashboard with forecast, admin panel, fraud flags and gate scanning.
+Prepared from repository commit `281b46dbf6fd1815611c1bfd2522899f3d8dfee5`. The original archive is unchanged. This release is prepared for review on a separate branch; live deployment requires the configuration in DEPLOYMENT.md.
+
+## Scope
+
+Application and deployment hardening only. No SQL injection work, attack payloads, penetration tests, live account changes, or live payment calls were performed. Existing query parameterisation is retained. The new database migration supports sessions, payment jobs, and reservation consistency.
+
+## Implemented changes
+
+- Opaque HttpOnly, SameSite=Strict sessions replace frontend bearer tokens. Password changes revoke all account sessions; logout revokes account/order sessions on that browser.
+- Order recovery requires a single-use emailed code, with a ten-minute expiry and five-attempt limit. Knowing the order ID and buyer email no longer returns tickets. Codes are HMAC protected and excluded from notification logs.
+- Staff password sign-in also requires an emailed code. Ticket-changing actions require verification within the preceding fifteen minutes.
+- Simulated methods require explicit opt-in outside production. Real payment uses Stripe-hosted Checkout, with the amount derived from database prices. Raw card data is not collected by this application.
+- Orders and reservations are saved before payment. Durable jobs use stable provider idempotency keys, verified provider responses, signed webhooks, and background reconciliation. Failed refunds stay pending and are retried.
+- Seat holds, checkout quantity, promo usage, and queue capacity are protected by database locks and constraints. Gate admission conditionally checks the QR version to prevent stale admission after transfer/resale. Event cancellation and start-time changes are blocked while payments are pending.
+- Referral discounts remain available. Rewards require a verified first account purchase of at least S$10 and settle after the event. Cancellation reverses legacy rewards and adjusts redeemed/earned points.
+- Production resale purchases are blocked because the original app has no seller payout integration. Local/staging resale workflows remain available. Stripe Connect/payout implementation is separate work.
+- Sensitive APIs use no-store responses, exact-origin/custom-header checks, persistent targeted rate limits, and bounded field validation. Default database TLS verifies certificates.
+- QR dependencies are self-hosted; executable-script CSP permits only this origin. The dependency lockfile and container runtime digest are committed in this deliverable.
+- The migration disables the four original documented fixture accounts while preserving their records/events/orders. Demo seeding requires explicit opt-in and an operator-provided password; it is forbidden in production.
+- Container port 3000 binds to loopback; nginx/CloudFront configuration and trusted-proxy settings are explicit. Production also requires a secret origin header. Deployments/migrations are serialized, and rollback to the old insecure application is refused.
 
 ## Run locally
 
-```bash
-cp .env.example .env            # fill JWT_SECRET, QR_SECRET, DATABASE_URL
-npm install
-npm run migrate                 # creates the 12 tables (db/schema.sql)
-npm run seed                    # optional demo data, password Passw0rd! (demo only)
-# export the variables from .env (or use your shell/IDE), then:
-npm start
-# open http://localhost:3000   (set DEMO_LOGINS=true to see the seeded demo logins on the login page)
-curl localhost:3000/health
-```
+Use Node 24 (container runtime is pinned) and PostgreSQL 15 or later. The application tests were run with Node 20.19.5 and disposable PostgreSQL 18.6; the container was not built on this computer because Docker is unavailable.
 
-## How the hard parts work
+1. Run `npm ci --ignore-scripts`.
+2. Copy `.env.example` to `.env`. Set a local database URL, exact APP_ORIGIN, and distinct random JWT_SECRET and QR_SECRET of at least 32 characters. The legacy JWT_SECRET name now protects verification codes. Do not commit `.env`.
+3. Run `node --env-file=.env db/migrate.js`.
+4. Configure an authorised SES sender and AWS region to use email recovery/staff login. AWS credentials come from the usual SDK credential chain/instance role. Recovery fails closed without mail configuration. Codes are never printed as a fallback.
+5. Optionally enable `ALLOW_SIMULATED_PAYMENTS=true` for a local demo. Leave it false to disable simulated methods. Add Stripe test credentials/webhook configuration to use hosted test Checkout.
+6. Run `node --env-file=.env src/server.js` and open the APP_ORIGIN URL.
 
-| Concern | Approach |
-|---|---|
-| No double-selling | Partial unique index `tickets(event_id, seat)` for valid/used tickets. Even if two checkouts race, the database rejects the second. |
-| Seat holds | `seat_holds` rows with an expiry (default 8 minutes, admin-editable). No Redis needed. |
-| Guests | Browser generates a random `X-Guest-Token` (16+ chars). Checkout needs name and email. After payment the API returns an `orderToken`; later, `POST /api/orders/lookup` with order number and email returns a fresh one. |
-| QR codes | `EE.<ticketId>.<version>.<HMAC>`. Transfer and resale bump the version, so the old QR stops working. Forged scans create a fraud flag. |
-| Smart queue | Admin turns on `highDemand` for an event. Buyers join `/queue`; each poll admits the next batch (20) for 10 minutes. Seats and holds require admission. |
-| Payments | Simulated by default (send `paymentToken: "decline"` to test a failure). Set `STRIPE_SECRET_KEY=sk_test_...` and send a Stripe `pm_...` token for real test-mode charges. |
-| Notifications | Always written to `notifications`. Email goes through SES when `SES_FROM` is set; SMS through SNS when `SMS_ENABLED=true`. WhatsApp is logged only until you connect a provider. |
+For optional fixtures, set ALLOW_DEMO_SEED=true and DEMO_SEED_PASSWORD to an operator-chosen password (12+ characters, at most 72 UTF-8 bytes), then run `node --env-file=.env db/seed.js`. This is never a production setup step. The organiser and administrator fixture accounts still require email verification.
 
-## API summary
+## Tests
 
-Public: `GET /api/events`, `GET /api/events/:id`, `GET /api/events/:id/seats`, `POST|GET /api/events/:id/queue(/join)`, `PUT /api/events/:id/holds` (body `{seats:[...]}`, replaces your whole hold set), `POST /api/checkout`, `POST /api/orders/lookup`, `POST /api/resale/:id/buy`.
-Order access (login or `X-Order-Token`): `GET /api/orders/:id`, `POST /api/orders/:id/cancel`, `POST /api/tickets/:id/transfer`, `POST /api/tickets/:id/resale`, `DELETE /api/resale/:id`.
-Customer: `GET /api/orders/mine`, `GET /api/me`, `GET /api/notifications`.
-Organiser: `POST|GET /api/organiser/events`, `POST /api/gate/scan` (also admin).
-Admin: `/api/admin/summary | organisers | events | fraud | settings | reminders`.
-Demo logins after `npm run seed`: ava.tan@mail.sg (customer), raj@harbourlive.sg (organiser), mei@eventeaseplus.sg (admin).
+Run `npm test`. Tests create a temporary PostgreSQL database bound to 127.0.0.1, synthetic accounts/orders, an in-memory mail sink, and a stub payment provider; then stop/delete the temporary database. They never use DATABASE_URL, SES, Stripe, or the deployed application. Embedded PostgreSQL binaries may need local process/socket permission; autoRehydrateSymlinks reconstructs the package's own links when needed.
 
-## Free-tier AWS plan (Singapore, ap-southeast-1)
+Tests cover migrations and upgrades, cookie sessions, staff verification, guest recovery, password revocation, booking and request replay, pending/failed payments, interrupted finalisation, retryable refunds, transfer/resale, queue/reservations, QR admission, limited promos, referral settlement, and the changed frontend forms. These are local functional/regression checks, not penetration tests. Real Stripe/SES integration and nginx/Docker deployment still need ordinary staging verification with authorised test accounts.
 
-AWS changed its free tier for accounts created on or after 15 July 2025: you get a Free plan with credits (reported as up to $200, lasting up to 6 months), and EC2, RDS and API Gateway only count as "free tier eligible", meaning their usage is paid from those credits. About 30 services stay always free within monthly limits, for example Lambda (1M requests) and DynamoDB (25 GB). Older accounts still follow the 12-month model (750 hours of EC2 and RDS micro instances). Check your own Billing console, because that decides which applies to you.
+## Before any deployment
 
-Recommended set, chosen so this exact code runs unchanged:
+Read `DEPLOYMENT.md`. The release deliberately refuses unsafe production configuration. Infrastructure settings and real secret/account changes require the person who controls your AWS and payment accounts. Nothing in this directory has applied those settings.
 
-| Piece | Service | Cost note |
-|---|---|---|
-| API | One EC2 `t3.micro` running the Docker image | Free-tier eligible (credits or 750 h on older accounts) |
-| Database | RDS PostgreSQL `db.t3.micro`, single-AZ, 20 GB, private subnet | Free-tier eligible; keep Multi-AZ off |
-| Website | Served by the API itself (`public/`), so no separate hosting. Optional: S3 for the static files | CloudFront has an always-free allowance |
-| HTTPS and one URL | CloudFront with the EC2 instance as its only origin | Free certificate via ACM; everything is same-origin so no CORS setup |
-| Secrets | SSM Parameter Store, SecureString | Standard parameters are free; Secrets Manager is not |
-| Logs and alarms | CloudWatch (basic) plus a billing budget alert | Within free allowances at demo traffic |
-| Email | SES, verify one sender (sandbox) | Very low cost; confirm current free allowance |
-| Reminders | A cron job on the server that calls `POST /api/admin/reminders` with `X-Cron-Secret` once a day | Free |
+## Source layout
 
-Avoid these because they are not free: NAT Gateway, ElastiCache (the code does not need Redis), Application Load Balancer (CloudFront replaces it), RDS Multi-AZ, SNS SMS, and a public IPv4 address you leave unattached.
-
-Setup order:
-1. Create an AWS Budget alert first (for example $5), then enable MFA on the root user.
-2. VPC: use the default VPC. Security group `api-sg` allows 80/443 from CloudFront (or 3000 from anywhere while testing); `db-sg` allows 5432 only from `api-sg`.
-3. RDS: PostgreSQL 16, `db.t3.micro`, single-AZ, not publicly accessible, automated backups on (7 days). Create database `eventeaseplus`.
-4. EC2: Amazon Linux 2023, `t3.micro`, install Docker, build or pull the image, run with `--env-file`. Run `npm run migrate` once from the container (`docker run --env-file .env <image> node db/migrate.js`).
-5. CloudFront: origin = the EC2 public DNS (HTTP on port 3000, or put nginx on 80 in front). Forward the `Authorization`, `X-Guest-Token`, `X-Order-Token` and `X-Cron-Secret` headers and disable caching for `/api/*` (you can cache `/app.js` and `/app.css`).
-6. Set `DB_SSL=true`, leave `CORS_ORIGINS` blank and `DEMO_LOGINS=false`, and use strong random `JWT_SECRET`, `QR_SECRET`, `CRON_SECRET` (`openssl rand -hex 32`).
-7. SES: verify a sender address, set `SES_FROM`, and give the EC2 instance role `ses:SendEmail`. Do not put AWS keys in `.env`.
-
-When credits end or the Free plan expires, either upgrade to the Paid plan or shut RDS and EC2 down. Expect roughly the price of one micro instance plus one micro database per month afterwards.
-
-## Known limits
-
-- The website was tested in a browser against a stand-in API that follows the same request and response shapes (guest and customer checkout, filters, promo, queue, Find my order, mobile layout). The real Express + PostgreSQL server could not be run where this was built (no package installs), so run through each flow once on your machine before deploying.
-- Organiser, admin and gate screens, transfer, resale and cancellation are wired to the API but were not browser-tested.
-
-- Not load-tested; the Postgres-based holds suit demo traffic (hundreds of buyers), not a stadium on-sale.
-- Charging happens inside the database transaction. If the process dies after a Stripe charge but before commit, refund manually.
-- Resale pays the seller nothing automatically (simulated); real payouts need Stripe Connect or similar.
-- WhatsApp needs a provider such as WhatsApp Business API or Twilio.
-- Passwords and tokens follow sensible defaults, but get a security review (and a PDPA check) before real customers.
-
-## Updates and the pipeline
-`.github/workflows/deploy.yml` tests every push and pull request (throwaway PostgreSQL, migrate twice, seed, smoke test),
-and on `main` packages the code to S3 and deploys it on the EC2 server through Systems Manager (`deploy/deploy.sh`):
-build the image, apply `db/migrations/*.sql`, swap the container, check `/health`, roll back if unhealthy.
-GitHub needs three repository variables: `AWS_ROLE_ARN`, `DEPLOY_BUCKET`, `INSTANCE_ID`. The full steps are in the AWS guide.
-
-## Design
-The look follows the supplied CT2079 frontend: warm paper background, ink text, coral accent, dark pill buttons, hero banner,
-category chips, gradient event cards, booking stepper and a footer with text-size and contrast controls.
-The app is still plain HTML, CSS and JavaScript served by the API, so there is no frontend build step.
+- `src/server.js`: existing application routes and application factory.
+- `src/browser-security.js`: sessions, recovery, staff verification, origin checks, targeted limits.
+- `src/commerce.js`: reservation, payment/refund lifecycle and reconciliation.
+- `src/payment-provider.js`: explicit payment modes and hosted Stripe Checkout.
+- `src/db-config.js`: certificate-verified database configuration.
+- `db/migrations/001_security.sql`: upgrade state and constraints.
+- `scripts/bootstrap-admin.js`: operator-only administrator provisioning/re-enablement.
+- `deploy/`: hardened deployment script and nginx example.

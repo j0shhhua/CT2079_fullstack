@@ -1,0 +1,34 @@
+# Release and configuration handoff
+
+This is a reviewable local implementation, not a live deployment. Review this release on a separate branch based on commit `281b46dbf6fd1815611c1bfd2522899f3d8dfee5`. Review any newer project changes before merging.
+
+## Required operator steps, in order
+
+1. Back up the database and verify restoration in staging. Put the site into maintenance while upgrading. Keep a reviewed compatible application release; the original application is not a safe rollback target after this migration.
+2. Install the supplied migration and run the normal workflow suite in a separate staging environment. Migrations create initial schema on a fresh database and apply each migration once under a deployment lock.
+3. Configure production secrets outside source control. JWT_SECRET and QR_SECRET must be different and at least 32 characters; CRON_SECRET and ORIGIN_VERIFY_SECRET must be strong random values. Preserve the existing QR_SECRET to avoid invalidating issued QR tickets. Rotate any genuinely exposed keys; do not rotate blindly without accounting for existing tickets.
+4. Enable DB_SSL=true and mount the trusted database CA. Set DB_CA_FILE=/run/certs/database-ca.pem. Remove sslmode/sslrootcert/sslcert/sslkey URL parameters: the application rejects these overrides so they cannot silently replace certificate verification. Keep RDS private and permit database access only from the application security group. Use a restricted application database role; use a separate migration role where practical.
+5. Configure APP_ORIGIN as the exact public HTTPS origin, without a trailing slash. Configure an authorised SES_FROM and AWS_REGION, and grant only the required mail permissions to the instance role. Verify email delivery with test recipients. Staff cannot sign in without receiving their code. SMS remains disabled unless explicitly configured.
+6. Configure Stripe test credentials first. Add the public webhook endpoint `/api/payments/webhook` and its signing secret. Subscribe to `checkout.session.completed`, `checkout.session.expired`, `checkout.session.async_payment_succeeded`, and `checkout.session.async_payment_failed`. Webhooks are signature checked; payment status, SGD amount, and job metadata are independently checked through Stripe. Simulated methods are rejected in production even if ALLOW_SIMULATED_PAYMENTS is accidentally true. Use live Stripe credentials only after normal staging payment/refund verification.
+7. Configure HTTPS from CloudFront to the origin using a valid origin certificate. Set CloudFront's custom origin header `X-Origin-Verify` to ORIGIN_VERIFY_SECRET. Do not put this value in frontend configuration. Restrict origin inbound access to CloudFront's origin-facing managed prefix list and required operator access; keep PostgreSQL private.
+8. Adapt/install `deploy/nginx.conf.example`. Populate its included real-IP file from the current official CloudFront address ranges. nginx must trust only CloudFront and overwrite X-Forwarded-For with the resolved viewer address. Set TRUST_PROXY_CIDRS=loopback for the nginx-to-application connection. Verify distinct ordinary staging clients appear as distinct client IPs; do not use a fixed hop count with an unrestricted origin.
+9. Disable CloudFront caching for `/api/*` and `/config.js`. Forward cookies, Origin, Content-Type, X-EE-Request, X-Guest-Token, Idempotency-Key, Stripe-Signature, and X-Cron-Secret as applicable. Forward the application cookies to the origin but never cache authenticated responses. Invalidate the changed static assets/config when deploying this release.
+10. Store the production environment file at the deployment script's configured path with permission 600. Export DB_CA_HOST_FILE to the trusted host CA path. The Docker runtime is non-root/read-only and exposes port 3000 only on loopback. Run the script only after the proxy and secrets are prepared. It intentionally leaves maintenance enabled on an unsuccessful incompatible upgrade.
+11. The migration disables the original AVA/RAJ/MEI/KAI fixture accounts. Provision a fresh administrator, or explicitly re-enable a reviewed administrator with a new password using `scripts/bootstrap-admin.js`. Supply BOOTSTRAP_ADMIN_EMAIL and BOOTSTRAP_ADMIN_PASSWORD through a secure operator environment, not command-line arguments. The script revokes existing sessions and does not print passwords. Review/re-enable required organiser accounts deliberately with new credentials; there is no public account-enablement endpoint.
+12. Schedule log/availability alerts and retain database backups. Monitor recovery mail failures, background reconciliation failures, and unresolved payment/refund jobs. Administrators can inspect `/api/admin/payment-jobs`; the admin screen shows pending work without exposing provider secrets.
+
+## Reconciliation and incident handling
+
+The application checks pending work every 30 seconds while it is running. Keep the process supervised. Processing keys derive from durable job IDs; retries reuse those keys. A saved successful payment reference can be finalised without repeating the charge. Refunds retain their provider refund ID and poll that refund instead of creating another one.
+
+Unknown Stripe operations without a saved reference are not recreated automatically after 20 hours, avoiding dependence on an expired provider idempotency record. Failed/cancelled provider refunds also require operator reconciliation. The order stays pending and the admin dashboard identifies it. These are deliberate attention states, not successful-payment/refund claims.
+
+An authorised operator must inspect the corresponding job and provider dashboard, establish the actual payment/refund result, and use `scripts/reconcile-payment.js` to link its provider reference. Supply PAYMENT_JOB_ID and exactly one STRIPE_SESSION_ID or STRIPE_REFUND_ID through the operator environment. The command verifies the provider amount, currency, and job metadata before processing; refund references must carry the matching jobId metadata. Never mark an order paid based on a customer's screenshot. Do not delete pending jobs to force another charge. Retain an incident record of any operator reconciliation.
+
+Production resale purchasing is disabled until seller payouts are implemented. Do not enable it simply by removing the guard. Local/staging fixtures can exercise resale without real financial obligations.
+
+Email staff verification is an added sign-in step; it is not phishing-resistant WebAuthn authentication. Infrastructure backups, account MFA, AWS permissions, certificate installation, secret rotation, and real provider configuration are operator actions, and have not been applied by this local patch.
+
+## Changes intentionally excluded
+
+SQL injection modifications, injection demonstrations, Burp attack runs, penetration tests, live destructive tests, repository permission changes, and live deployments.
