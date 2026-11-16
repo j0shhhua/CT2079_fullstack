@@ -2,25 +2,32 @@
   "name": "eventeaseplus",
   "version": "1.0.0",
   "private": true,
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
     "migrate": "node db/migrate.js",
-    "seed": "node db/seed.js"
+    "seed": "node db/seed.js",
+    "test": "node --test --test-concurrency=1 tests/*.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-ses": "^3.600.0",
     "@aws-sdk/client-sns": "^3.600.0",
     "bcryptjs": "^2.4.3",
-    "cors": "^2.8.5",
     "express": "^4.21.0",
     "express-rate-limit": "^7.4.0",
     "helmet": "^7.1.0",
-    "jsonwebtoken": "^9.0.2",
     "pg": "^8.12.0"
   },
   "optionalDependencies": {
     "stripe": "^16.0.0"
+  },
+  "devDependencies": {
+    "embedded-postgres": "^18.6.0-beta.19",
+    "jsdom": "26.1.0",
+    "jsqr": "1.4.0",
+    "qrcodejs": "1.0.0"
   }
 }

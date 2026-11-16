@@ -1,11 +1,15 @@
 'use strict';
-// Demo data matching the website demo. DEMO ONLY: every account uses the password Passw0rd! so never run this against production.
+// Explicitly enabled local/staging fixtures only. Never seeds production.
 const { Client } = require('pg'), bcrypt = require('bcryptjs');
+const { databaseConfig } = require('../src/db-config');
 (async () => {
-  const c = new Client({ connectionString: process.env.DATABASE_URL, ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false });
+  if (process.env.NODE_ENV === 'production' || process.env.ALLOW_DEMO_SEED !== 'true') throw new Error('Demo seeding is disabled');
+  const password = process.env.DEMO_SEED_PASSWORD || '';
+  if (password.length < 12 || Buffer.byteLength(password)>72) throw new Error('Set a DEMO_SEED_PASSWORD of 12+ characters and at most 72 bytes');
+  const c = new Client(databaseConfig());
   await c.connect();
   if ((await c.query('select 1 from users limit 1')).rowCount) { console.log('Users exist, skipping seed.'); return c.end(); }
-  const hash = await bcrypt.hash('Passw0rd!', 10), id = {};
+  const hash = await bcrypt.hash(password, 12), id = {};
   const U = [['ava', 'Ava Tan', 'ava.tan@mail.sg', 'customer', true, 120, '+65 9123 4567'], ['raj', 'Raj, Harbour Live', 'raj@harbourlive.sg', 'organiser', true, 0, null],
     ['mei', 'Mei, Admin', 'mei@eventeaseplus.sg', 'admin', true, 0, null], ['kai', 'Kai, Lion City Sports', 'kai@lcsports.sg', 'organiser', false, 0, null]];
   for (const [k, n, e, r, ok, pts, ph] of U) id[k] = (await c.query('insert into users(name,email,phone,password_hash,role,organiser_approved,points,referral_code) values($1,$2,$3,$4,$5,$6,$7,$8) returning id',
@@ -23,5 +27,5 @@ const { Client } = require('pg'), bcrypt = require('bcryptjs');
     const o1 = (await c.query(`insert into orders(buyer_name,buyer_email,event_id,subtotal,total,payment_method,status) values('Demo buyers','demo@eventeaseplus.sg',$1,0,0,'card','paid') returning id`, [e.id])).rows[0].id;
     for (let i = 0; i < 80; i++) if (Math.random() < .3) { const s = String.fromCharCode(65 + (i / 10 | 0)) + (i % 10 + 1), r = i / 10 | 0; await c.query('insert into tickets(order_id,event_id,seat,tier,price) values($1,$2,$3,$4,$5)', [o1, e.id, s, r < 2 ? 'vip' : r < 7 ? 'std' : 'con', r < 2 ? a : r < 7 ? b : k]); }
   }
-  console.log('Seeded. Demo logins (password Passw0rd!): ava.tan@mail.sg, raj@harbourlive.sg, mei@eventeaseplus.sg, kai@lcsports.sg'); await c.end();
+  console.log('Seeded local fixtures. Use the password provided through DEMO_SEED_PASSWORD.'); await c.end();
 })().catch(e => { console.error(e.message); process.exit(1); });
