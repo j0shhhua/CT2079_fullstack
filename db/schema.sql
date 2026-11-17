@@ -1,4 +1,4 @@
--- Eventeaseplus PostgreSQL schema (PostgreSQL 15+). Run once: psql "$DATABASE_URL" -f db/schema.sql
+-- Eventease PostgreSQL schema (PostgreSQL 15+). Run once: psql "$DATABASE_URL" -f db/schema.sql
 create extension if not exists pgcrypto;
 
 create table users (
