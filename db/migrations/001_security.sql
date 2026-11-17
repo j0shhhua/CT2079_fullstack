@@ -22,8 +22,8 @@ create table recovery_challenges (
 );
 alter table users add column disabled boolean not null default false;
 -- Retire the original publicly documented fixture accounts without deleting their orders/events.
-update users set disabled=true where (split_part(lower(email),'@',1),referral_code) in
-  (('ava.tan','REF-AVA'),('raj','REF-RAJ'),('mei','REF-MEI'),('kai','REF-KAI'));
+update users set disabled=true where (lower(email),referral_code) in
+  (('ava.tan@mail.sg','REF-AVA'),('raj@harbourlive.sg','REF-RAJ'),('mei@eventeaseplus.sg','REF-MEI'),('kai@lcsports.sg','REF-KAI'));
 create table request_limits (
   key text primary key,
   count int not null,

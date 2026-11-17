@@ -1,6 +1,6 @@
-# Eventease: secured working copy
+# Eventease
 
-Prepared from repository commit `281b46dbf6fd1815611c1bfd2522899f3d8dfee5`. The original archive is unchanged. This release is prepared for review on a separate branch; live deployment requires the configuration in DEPLOYMENT.md.
+Event booking project with guest checkout, verified order recovery, organiser tools and QR tickets. This update is based on main commit `accf9544aac85205085cca91f803a4fa89e208c3`. Hosting setup is described in `DEPLOYMENT.md` and `HOSTING-HANDOFF.md`.
 
 ## Scope
 
@@ -11,7 +11,7 @@ Application and deployment hardening only. No SQL injection work, attack payload
 - Opaque HttpOnly, SameSite=Strict sessions replace frontend bearer tokens. Password changes revoke all account sessions; logout revokes account/order sessions on that browser.
 - Order recovery requires a single-use emailed code, with a ten-minute expiry and five-attempt limit. Knowing the order ID and buyer email no longer returns tickets. Codes are HMAC protected and excluded from notification logs.
 - Staff password sign-in also requires an emailed code. Ticket-changing actions require verification within the preceding fifteen minutes.
-- Simulated methods require explicit opt-in outside production. Real payment uses Stripe-hosted Checkout, with the amount derived from database prices. Raw card data is not collected by this application.
+- Simulated methods require explicit opt-in. Hosted classroom demos also require PAYMENT_MODE=demo while retaining production browser/database protections; Stripe credentials are refused in that mode. Separate real-payment flows use Stripe-hosted Checkout with database-derived totals. Raw card data is not collected by this application.
 - Orders and reservations are saved before payment. Durable jobs use stable provider idempotency keys, verified provider responses, signed webhooks, and background reconciliation. Failed refunds stay pending and are retried.
 - Seat holds, checkout quantity, promo usage, and queue capacity are protected by database locks and constraints. Gate admission conditionally checks the QR version to prevent stale admission after transfer/resale. Event cancellation and start-time changes are blocked while payments are pending.
 - Referral discounts remain available. Rewards require a verified first account purchase of at least S$10 and settle after the event. Cancellation reverses legacy rewards and adjusts redeemed/earned points.
@@ -29,10 +29,14 @@ Use Node 24 (container runtime is pinned) and PostgreSQL 15 or later. The applic
 2. Copy `.env.example` to `.env`. Set a local database URL, exact APP_ORIGIN, and distinct random JWT_SECRET and QR_SECRET of at least 32 characters. The legacy JWT_SECRET name now protects verification codes. Do not commit `.env`.
 3. Run `node --env-file=.env db/migrate.js`.
 4. Configure an authorised SES sender and AWS region to use email recovery/staff login. AWS credentials come from the usual SDK credential chain/instance role. Recovery fails closed without mail configuration. Codes are never printed as a fallback.
-5. Optionally enable `ALLOW_SIMULATED_PAYMENTS=true` for a local demo. Leave it false to disable simulated methods. Add Stripe test credentials/webhook configuration to use hosted test Checkout.
+5. For a local classroom demo set `PAYMENT_MODE=demo` and `ALLOW_SIMULATED_PAYMENTS=true`, with no Stripe credentials. The site labels practice bookings and tickets clearly. The default `PAYMENT_MODE=disabled` accepts no payments. Use `PAYMENT_MODE=stripe` with Stripe test credentials/webhook configuration only when testing the provider integration separately.
 6. Run `node --env-file=.env src/server.js` and open the APP_ORIGIN URL.
 
 For optional fixtures, set ALLOW_DEMO_SEED=true and DEMO_SEED_PASSWORD to an operator-chosen password (12+ characters, at most 72 UTF-8 bytes), then run `node --env-file=.env db/seed.js`. This is never a production setup step. The organiser and administrator fixture accounts still require email verification.
+
+For the public classroom demo, use `.env.demo.example` as a reference while updating the existing server environment file. Keep `NODE_ENV=production`: HTTPS cookies, database TLS, origin verification and emailed staff codes remain required. Explicit demo mode never creates a Stripe client and refuses Stripe credentials. Resale listing and purchasing stay disabled on the hosted site. Do not enter real payment details or use these tickets for real admission.
+
+Past events are excluded from discovery and their old links show that booking is closed. Existing orders, event history and gate admission windows are preserved.
 
 ## Tests
 

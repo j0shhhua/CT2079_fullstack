@@ -37,7 +37,7 @@ const priceOf = (e, s) => Number(e['price_' + tierOf(e, s)]);
 const sg = (t, v) => crypto.createHmac('sha256', QR).update(`${t.id}.${v}.${t.event_id}.${t.seat}`).digest('base64url').slice(0, 16);
 const qr = t => `EE.${t.id}.${t.qr_version}.${sg(t, t.qr_version)}`;
 const safeEq = (a, b) => { const x = Buffer.from(a), y = Buffer.from(b); return x.length === y.length && crypto.timingSafeEqual(x, y); };
-const pub = e => ({ id: e.id, title: e.title, category: e.category, startsAt: e.starts_at, venue: e.venue, location: e.location, prices: { vip: +e.price_vip, std: +e.price_std, con: +e.price_con },
+const pub = e => ({ id: e.id, title: e.title, category: e.category, startsAt: e.starts_at, venue: e.venue, location: e.location, bookingOpen: e.status === 'live' && new Date(e.starts_at).getTime() > Date.now(), prices: { vip: +e.price_vip, std: +e.price_std, con: +e.price_con },
   rows: e.rows, cols: e.cols, status: e.status, highDemand: e.high_demand, capacity: e.rows * e.cols, ...(e.sold !== undefined ? { sold: e.sold, available: e.rows * e.cols - e.sold } : {}) });
 const forecast = (e, sold) => { const dt = Math.max(0, (new Date(e.starts_at) - Date.now()) / 864e5), rate = sold / Math.max(1, 45 - dt), cap = e.rows * e.cols, pj = Math.min(cap, Math.round(sold + rate * dt * .8));
   return { perDay: +rate.toFixed(1), projected: pj, capacity: cap, advice: pj >= cap * .9 ? 'Likely to sell out. Consider the high-demand queue and a VIP price rise.' : pj < cap * .5 ? 'Demand is soft. Consider an early-bird push.' : 'On track.' }; };
@@ -56,7 +56,9 @@ async function notify({ userId, email, phone, channel = 'email', subject, body }
   } catch (e) { status = 'failed'; console.error('notify failed', e.message); }
   await q('insert into notifications(user_id,email,phone,channel,subject,body,status) values($1,$2,$3,$4,$5,$6,$7)', [userId || null, email, phone || null, channel, subject, body, status]);
 }
-const notifyOrder = async (o, subject, body) => { const base = { userId: o.user_id, email: o.buyer_email, phone: o.buyer_phone, subject, body };
+const notifyOrder = async (o, subject, body) => { const base = { userId: o.user_id, email: o.buyer_email, phone: o.buyer_phone,
+  subject: provider.demoMode ? '[Classroom demo] ' + subject : subject,
+  body: provider.demoMode ? 'Classroom demo only. No real payment was taken and these tickets are not valid for entry.\n\n' + body : body };
   await notify({ ...base, channel: 'email' }); if (o.alert_channel !== 'email') await notify({ ...base, channel: o.alert_channel }); };
 
 // Recovery codes are sent directly and are never stored in notification bodies or logs.
@@ -125,7 +127,7 @@ app.post('/api/payments/webhook', express.raw({ type: 'application/json', limit:
   res.json({ received: true });
 }));
 app.use(helmet({ contentSecurityPolicy: CSP }), express.json({ limit: '100kb' }));
-app.get('/config.js', (req, res) => res.set('Cache-Control','no-store').type('js').send(`window.EE=${JSON.stringify({ paymentMethods: provider.methods, resaleEnabled: E.NODE_ENV !== 'production' })};`));
+app.get('/config.js', (req, res) => res.set('Cache-Control','no-store').type('js').send(`window.EE=${JSON.stringify({ paymentMethods: provider.methods, demoMode: provider.demoMode === true, resaleEnabled: E.NODE_ENV !== 'production' })};`));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 app.use('/api', security.boundary, rateLimit({ windowMs: 15 * 60 * 1000, limit: 600, standardHeaders: 'draft-7', legacyHeaders: false }));
 const strict = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: 'draft-7', legacyHeaders: false });
@@ -193,7 +195,7 @@ app.get('/api/notifications', need('customer', 'organiser', 'admin'), wrap(async
 // Discovery
 app.get('/api/events', wrap(async (req, res) => {
   const { q: s, category, location, from, maxPrice } = req.query;
-  const r = await q(`select e.*,(select count(*) from tickets t where t.event_id=e.id and t.status in ('reserved','valid','used'))::int sold from events e where e.status='live'
+  const r = await q(`select e.*,(select count(*) from tickets t where t.event_id=e.id and t.status in ('reserved','valid','used'))::int sold from events e where e.status='live' and e.starts_at>now()
     and ($1::text is null or e.title ilike '%'||$1||'%' or e.venue ilike '%'||$1||'%') and ($2::text is null or e.category=$2) and ($3::text is null or e.location=$3)
     and ($4::date is null or e.starts_at>=$4) and ($5::numeric is null or least(e.price_vip,e.price_std,e.price_con)<=$5) order by e.starts_at`, [s || null, category || null, location || null, from || null, maxPrice || null]);
   res.json(r.rows.map(pub));
@@ -201,6 +203,7 @@ app.get('/api/events', wrap(async (req, res) => {
 app.get('/api/events/:id', wrap(async (req, res) => res.json(pub(await getEvent(req.params.id, req.user)))));
 app.get('/api/events/:id/seats', wrap(async (req, res) => {
   const e = await getEvent(req.params.id, req.user), staff = req.user && (req.user.role === 'admin' || req.user.id === e.organiser_id);
+  if (new Date(e.starts_at).getTime() <= Date.now()) bad(409, 'This event has already started. Booking is closed.', 'EVENT_CLOSED');
   if (e.high_demand && !staff) await requireAdmitted(e.id, req.holder);
   const sold = (await q(`select seat from tickets where event_id=$1 and status in ('reserved','valid','used')`, [e.id])).rows.map(r => r.seat);
   const held = (await q('select seat,holder,expires_at from seat_holds where event_id=$1 and expires_at>now()', [e.id])).rows;
@@ -210,7 +213,9 @@ app.get('/api/events/:id/seats', wrap(async (req, res) => {
 
 // Smart queue
 async function queueStatus(req, res) {
-  const e = await getEvent(req.params.id, req.user, true); await admitBatch(e.id);
+  const e = await getEvent(req.params.id, req.user, true);
+  if (new Date(e.starts_at).getTime() <= Date.now()) bad(409, 'This event has already started. Booking is closed.', 'EVENT_CLOSED');
+  await admitBatch(e.id);
   const me = (await q(`select * from queue_entries where event_id=$1 and holder=$2 and status in ('waiting','admitted') order by id desc limit 1`, [e.id, req.holder || ''])).rows[0];
   if (!me) return res.json({ status: e.high_demand ? 'none' : 'open' });
   const ahead = me.status === 'waiting' ? +(await q(`select count(*) from queue_entries where event_id=$1 and status='waiting' and id<$2`, [e.id, me.id])).rows[0].count : 0;
@@ -218,6 +223,7 @@ async function queueStatus(req, res) {
 }
 app.post('/api/events/:id/queue/join', wrap(async (req, res) => {
   const e = await getEvent(req.params.id, req.user, true); if (!req.holder) bad(400, 'Missing X-Guest-Token or sign-in');
+  if (new Date(e.starts_at).getTime() <= Date.now()) bad(409, 'This event has already started. Booking is closed.', 'EVENT_CLOSED');
   await q("insert into queue_entries(event_id,holder) values($1,$2) on conflict(event_id,holder) where status in ('waiting','admitted') do nothing", [e.id, req.holder]);
   return queueStatus(req, res);
 }));
@@ -265,7 +271,7 @@ app.post('/api/tickets/:id/transfer', wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 app.post('/api/tickets/:id/resale', wrap(async (req, res) => {
-  if (E.NODE_ENV === 'production') bad(503,'Resale is currently unavailable.');
+  if (E.NODE_ENV === 'production') bad(503, 'Resale is unavailable until seller payouts are configured.');
   const p = Number((req.body || {}).price);
   const l = await tx(async cl => {
     const t = await lockTicket(cl, req, req.params.id); if (!(p > 0) || p > +t.price) bad(400, `Resale price must be above 0 and no higher than face value (S$${t.price})`);
@@ -278,7 +284,7 @@ app.delete('/api/resale/:id', wrap(async (req, res) => {
   const l = (await q(`select * from resale_listings where id=$1 and status='open'`, [Number(req.params.id) || 0])).rows[0]; if (!l) bad(404, 'Listing not found');
   await orderFor(req, l.seller_order_id, pool, true); const changed = await q(`update resale_listings set status='withdrawn' where id=$1 and status='open' returning id`, [l.id]); if (!changed.rowCount) bad(409, 'Listing is no longer available'); res.json({ ok: true });
 }));
-// Gate validation (organiser of the event, or admin)
+// Gate validation by the event's organiser.
 const GATE_OPEN_H = 2, GATE_CLOSE_H = 8; // gates accept scans from 2 hours before start until 8 hours after
 app.post('/api/gate/scan', need('organiser'), wrap(async (req, res) => {
   const code = String((req.body || {}).code || '').trim(), p = code.split('.');

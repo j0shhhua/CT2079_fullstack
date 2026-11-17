@@ -1,9 +1,14 @@
 'use strict';
 class PaymentDeclined extends Error {}
 function paymentProvider(env, stripeClient) {
-  const simulated = env.NODE_ENV !== 'production' && env.ALLOW_SIMULATED_PAYMENTS === 'true';
-  const stripe = stripeClient || (env.STRIPE_SECRET_KEY ? require('stripe')(env.STRIPE_SECRET_KEY, { timeout: 15000, maxNetworkRetries: 1 }) : null);
-  if (env.NODE_ENV === 'production' && (!stripe || !env.STRIPE_WEBHOOK_SECRET)) throw new Error('Production requires Stripe and webhook configuration');
+  const mode = env.PAYMENT_MODE || '';
+  if (!['', 'demo', 'stripe', 'disabled'].includes(mode)) throw new Error('PAYMENT_MODE must be demo, stripe or disabled');
+  const demo = mode === 'demo';
+  if (demo && env.ALLOW_SIMULATED_PAYMENTS !== 'true') throw new Error('Demo mode requires ALLOW_SIMULATED_PAYMENTS=true');
+  if (demo && (env.STRIPE_SECRET_KEY || env.STRIPE_WEBHOOK_SECRET || stripeClient)) throw new Error('Remove Stripe credentials when using demo payments');
+  const simulated = env.ALLOW_SIMULATED_PAYMENTS === 'true' && (env.NODE_ENV !== 'production' || demo) && !['stripe', 'disabled'].includes(mode);
+  const stripe = !demo && mode !== 'disabled' ? stripeClient || (env.STRIPE_SECRET_KEY ? require('stripe')(env.STRIPE_SECRET_KEY, { timeout: 15000, maxNetworkRetries: 1 }) : null) : null;
+  if ((env.NODE_ENV === 'production' && !demo && mode !== 'disabled' || mode === 'stripe') && (!stripe || !env.STRIPE_WEBHOOK_SECRET)) throw new Error('Production requires Stripe and webhook configuration');
   function validate(method) {
     if (['card','paynow'].includes(method) && simulated) return;
     if (method === 'stripe' && stripe) return;
@@ -31,7 +36,7 @@ function paymentProvider(env, stripeClient) {
     const r = job.refund_ref ? await stripe.refunds.retrieve(job.refund_ref) : await stripe.refunds.create({ payment_intent: job.payment_ref, amount: Number(job.amount_cents), metadata: {jobId:job.id} }, { idempotencyKey: job.id });
     return { settled: r.status === 'succeeded', refundRef: r.id, attention: ['failed','canceled'].includes(r.status) };
   }
-  return { validate, pay, refund, methods: [...(simulated ? ['card','paynow'] : []), ...(stripe ? ['stripe'] : [])],
+  return { validate, pay, refund, demoMode: simulated, methods: [...(simulated ? ['card','paynow'] : []), ...(stripe ? ['stripe'] : [])],
     webhook: stripe && env.STRIPE_WEBHOOK_SECRET ? (body, signature) => stripe.webhooks.constructEvent(body, signature, env.STRIPE_WEBHOOK_SECRET) : null };
 }
 module.exports = { paymentProvider, PaymentDeclined };
