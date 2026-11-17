@@ -154,3 +154,27 @@ test('event status and start time remain stable while a checkout payment is pend
  assert.equal((await organiserClient.send('/api/organiser/events/'+eventId,{startsAt:later},{method:'PUT'})).status,200);
  assert.equal((await adminClient.send('/api/admin/events/'+eventId,{status:'cancelled'},{method:'PATCH'})).status,200);
 });
+test('past events leave discovery and cannot open seats or join a queue',async()=>{
+ const c=client();assert.ok((await c.send('/api/events')).body.some(e=>e.id===eventId));
+ await pool.query("update events set starts_at=now()-interval '1 day',high_demand=true where id=$1",[eventId]);
+ assert.equal((await c.send('/api/events')).body.some(e=>e.id===eventId),false);
+ assert.equal((await c.send('/api/events/'+eventId)).body.bookingOpen,false);
+ const map=await c.send('/api/events/'+eventId+'/seats');assert.equal(map.status,409);assert.equal(map.body.code,'EVENT_CLOSED');
+ assert.equal((await c.send('/api/events/'+eventId+'/queue/join',{})).status,409);
+ assert.equal((await pool.query('select count(*)::int n from queue_entries')).rows[0].n,0);
+});
+test('hosted demo keeps Secure sessions and origin checks while disabling resale',async()=>{
+ const u=await user('demo-customer@example.test');
+ const hostedEnv={...env,NODE_ENV:'production',PAYMENT_MODE:'demo',APP_ORIGIN:'https://demo.example.test',SES_FROM:'sender@example.test',ORIGIN_VERIFY_SECRET:'o'.repeat(48)};
+ const hosted=createApp({pool,env:hostedEnv,mailRecovery:async()=>{}}),http=hosted.listen(0,'127.0.0.1');await new Promise(r=>http.once('listening',r));
+ const url='http://127.0.0.1:'+http.address().port;
+ const headers={'X-Origin-Verify':hostedEnv.ORIGIN_VERIFY_SECRET,'Origin':hostedEnv.APP_ORIGIN,'X-EE-Request':'1','Content-Type':'application/json','X-Guest-Token':'a'.repeat(24)};
+ try {
+  assert.equal((await fetch(url+'/config.js')).status,403);
+  const config=await fetch(url+'/config.js',{headers});const configText=await config.text();assert.equal(config.headers.get('cache-control'),'no-store');
+  assert.match(configText,/"demoMode":true/);assert.match(configText,/"resaleEnabled":false/);assert.doesNotMatch(configText,/ORIGIN_VERIFY_SECRET|o{48}/);
+  const login=await fetch(url+'/api/auth/login',{method:'POST',headers,body:JSON.stringify({email:u.email,password:'LocalFixture123!'})});assert.equal(login.status,200);
+  assert.match(login.headers.get('set-cookie'),/; Secure/);assert.match(login.headers.get('set-cookie'),/; HttpOnly/);
+  for(const path of ['/api/resale/1/buy','/api/tickets/1/resale']) assert.equal((await fetch(url+path,{method:'POST',headers,body:'{}'})).status,503);
+ }finally{await new Promise(r=>http.close(r))}
+});

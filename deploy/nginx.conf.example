@@ -12,6 +12,7 @@ server {
     real_ip_recursive on;
     client_max_body_size 100k;
     if (-f /run/eventease-maintenance) { return 503; }
+    if (-f /run/eventeaseplus-maintenance) { return 503; }
     location / {
         proxy_pass http://127.0.0.1:3000;
         proxy_set_header Host $host;

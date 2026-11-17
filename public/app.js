@@ -9,6 +9,7 @@ const mem = {}, store = { get(k, s) { try { return (s ? sessionStorage : localSt
 const rid = () => Array.from(crypto.getRandomValues(new Uint8Array(12)), b => b.toString(16).padStart(2, '0')).join('');
 const S = { user: null, guest: store.get('ee_guest') || (store.set('ee_guest', rid()), store.get('ee_guest')), F: { q: '', cat: '', loc: '', date: '', max: 250 }, form: {}, all: null, ev: null, quote: null, busy: false, timers: [] };
 const minPrice = e => Math.min(e.prices.vip, e.prices.std, e.prices.con), hue = id => (id * 47) % 360;
+const bookingOpen = e => e.bookingOpen !== false && e.status === 'live' && new Date(e.startsAt).getTime() > Date.now();
 const tierOf = (e, s) => { const i = s.charCodeAt(0) - 65; return i < 2 ? 'vip' : i < e.rows - 1 ? 'std' : 'con' };
 const IC = { ticket: '<path d="M3 8a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2a2 2 0 0 0 0 4v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a2 2 0 0 0 0-4z"/><path d="M9 10h6M9 14h6"/>', pin: '<path d="M12 21s7-6.2 7-11a7 7 0 1 0-14 0c0 4.8 7 11 7 11z"/><circle cx="12" cy="10" r="2.5"/>', cal: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>', check: '<path d="M5 12l5 5 9-10"/>', search: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/>', chev: '<path d="M6 9l6 6 6-6"/>', out: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>', chart: '<path d="M5 20V10M12 20V4M19 20v-7"/>', plus: '<path d="M12 5v14M5 12h14"/>', clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>', list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>', warn: '<path d="M12 3l10 18H2z"/><path d="M12 10v5M12 18h.01"/>', info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>', user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>', scan: '<path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M4 12h16"/>' };
 const ic = (n, s = 18) => `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${IC[n] || ''}</svg>`;
@@ -31,6 +32,7 @@ const clearTimers = () => { S.timers.forEach(clearInterval); S.timers = [] };
 /* ---------- shell ---------- */
 async function boot() {
   store.del('ee_tok'); store.del('ee_ot', 1);
+  $('#demo-notice').hidden = window.EE?.demoMode !== true;
   try { S.user = (await api('/session')).user } catch { S.user = null }
   applyUI(); route();
 }
@@ -84,7 +86,7 @@ ${S.user ? '' : '<section class="signup-banner"><div><span class="eyebrow">Membe
   grid();
 }
 function grid() {
-  const F = S.F, q = F.q.toLowerCase(), l = S.all.filter(e => (!q || (e.title + e.venue).toLowerCase().includes(q)) && (!F.cat || e.category === F.cat) && (!F.loc || e.location === F.loc) && (!F.date || e.startsAt.slice(0, 10) >= F.date) && minPrice(e) <= F.max);
+  const F = S.F, q = F.q.toLowerCase(), l = S.all.filter(e => bookingOpen(e) && (!q || (e.title + e.venue).toLowerCase().includes(q)) && (!F.cat || e.category === F.cat) && (!F.loc || e.location === F.loc) && (!F.date || e.startsAt.slice(0, 10) >= F.date) && minPrice(e) <= F.max);
   const c = $('#cnt'); if (c) c.textContent = `${l.length} event${l.length === 1 ? '' : 's'}`;
   const g = $('#grid'); g.classList.toggle('as-cal', S.view === 'cal'); if (S.view === 'cal') { g.innerHTML = cal(l); return }
   g.innerHTML = l.length ? l.map(e => `<a class="event-card" href="#event-${e.id}"><div class="event-visual g${e.id % 6}"><img class="ph" src="${ph(e)}" alt="" loading="lazy" decoding="async">${e.available === 0 ? '<span class="pill">Sold out</span>' : e.highDemand ? '<span class="pill">High demand</span>' : e.available < 15 ? `<span class="pill am">Only ${e.available} left</span>` : ''}</div>
@@ -95,11 +97,13 @@ function grid() {
 /* ---------- event, seats, checkout ---------- */
 async function evPage(id, u) {
   const v = S.ev = { id, d: null, mine: [], exp: null, resale: [] }; S.quote = null;
+  const event = await api(`/events/${id}`);
+  if (!bookingOpen(event)) { $('#app').innerHTML = `<div class="box"><h1>${esc(event.title)}</h1><p>${esc(fdt(event.startsAt))} &middot; ${esc(event.venue)}</p><h2>Booking is closed</h2><p>This event has started or is no longer on sale.</p><a class="button" href="#home">Browse upcoming events</a></div>`; return }
   try { await loadSeats() } catch (e) { if (e.code === 'QUEUE_REQUIRED') return waitingRoom(id); throw e }
   drawEvent(); await requote(); S.timers.push(setInterval(() => { if (!S.busy && !document.hidden && !document.querySelector('[data-pending]')) refresh().catch(() => { }) }, 8000), setInterval(tick, 1000));
 }
 async function loadSeats() { const v = S.ev, d = await api(`/events/${v.id}/seats`); v.d = d; v.mine = d.mine; v.exp = d.holdExpiresAt ? new Date(d.holdExpiresAt).getTime() : null; v.resale = d.resale }
-async function refresh() { try { await loadSeats() } catch (e) { if (e.code === 'QUEUE_REQUIRED') return route(); throw e } drawMap(); if (!S.ev.mine.length) { S.quote = null; drawPanel() } }
+async function refresh() { try { await loadSeats() } catch (e) { if (e.code === 'QUEUE_REQUIRED' || e.code === 'EVENT_CLOSED') return route(); throw e } drawMap(); if (!S.ev.mine.length) { S.quote = null; drawPanel() } }
 async function requote() {
   const v = S.ev, f = S.form; if (!v.mine.length) { S.quote = null; return drawPanel() }
   try { S.quote = await api('/quote', { method: 'POST', body: { eventId: v.id, promoCode: f.promoOk || undefined, usePoints: !!f.usePts } }) } catch (e) { if (f.promoOk) { f.promoOk = ''; toast(e.message) } S.quote = null; try { S.quote = await api('/quote', { method: 'POST', body: { eventId: v.id } }) } catch { } }
@@ -139,7 +143,7 @@ function drawMap() {
     rows += `<div class="row"><b>${r}</b>`;
     for (let n = 1; n <= e.cols; n++) {
       const s = r + n, st = sold.has(s) ? 'x' : mine.has(s) ? 'm' : held.has(s) ? 'h' : '', t = tierOf(e, s), ac = i === e.rows - 1 && (n < 3 || n > e.cols - 2);
-      rows += `<button class="s ${ac ? 'wc' : ''} ${st}" data-a="seat" data-v="${s}" aria-pressed="${st === 'm'}" aria-label="Row ${r} seat ${n}, ${CN[t]}, ${fm(e.prices[t])}, ${st === 'x' ? 'taken' : st === 'h' ? 'held by another buyer' : st === 'm' ? 'selected' : 'available'}${ac ? ', wheelchair space' : ''}" ${st === 'x' || st === 'h' || e.status !== 'live' ? 'disabled' : ''}>${st === 'x' ? '&times;' : st === 'm' ? ic('check', 14) : ac ? '&#9855;' : n}</button>`;
+      rows += `<button class="s ${ac ? 'wc' : ''} ${st}" data-a="seat" data-v="${s}" aria-pressed="${st === 'm'}" aria-label="Row ${r} seat ${n}, ${CN[t]}, ${fm(e.prices[t])}, ${st === 'x' ? 'taken' : st === 'h' ? 'held by another buyer' : st === 'm' ? 'selected' : 'available'}${ac ? ', wheelchair space' : ''}" ${st === 'x' || st === 'h' || !bookingOpen(e) ? 'disabled' : ''}>${st === 'x' ? '&times;' : st === 'm' ? ic('check', 14) : ac ? '&#9855;' : n}</button>`;
     }
     rows += '</div>';
   }
@@ -156,9 +160,10 @@ ${can ? `<div class="pn-sec"><div class="pr" style="margin-top:0"><input id="pc"
 ${u && u.points >= 10 ? `<label class="chk"><input type="checkbox" data-a="pts" ${f.usePts ? 'checked' : ''}> Use points (${u.points} available, 10 = S$1)</label>` : ''}
 ${u ? `<p class="mute">Tickets go to ${esc(u.email)}.</p>` : `<div class="f"><label>Name<input id="gn" autocomplete="name" value="${esc(f.gn || '')}"></label><label>Email<input id="ge" type="email" autocomplete="email" value="${esc(f.ge || '')}"></label><label>Phone (optional)<input id="gp" type="tel" autocomplete="tel" inputmode="tel" pattern="\+?[0-9 ()\-]{8,20}" title="Phone number, for example +65 9123 4567"  value="${esc(f.gp || '')}"></label></div><p class="mute">No account needed. Reopen tickets later with Find my order.</p>`}
 <label>Payment<select id="pm">${(window.EE?.paymentMethods || []).map(m => `<option value="${esc(m)}" ${f.pm === m ? 'selected' : ''}>${m === 'stripe' ? 'Secure payment with Stripe' : m === 'card' ? 'Card (demo)' : 'PayNow (demo)'}</option>`).join('')}</select></label>${window.EE?.paymentMethods?.length ? '' : '<p class="msg">Payments are not configured. Please contact the organiser.</p>'}
+${window.EE?.demoMode ? '<p class="demo-note">This is a practice booking. No money will be charged.</p>' : ''}
 
 <label>Alerts<select id="nc"><option value="email">Email only<option value="sms" ${f.nc === 'sms' ? 'selected' : ''}>SMS<option value="whatsapp" ${f.nc === 'whatsapp' ? 'selected' : ''}>WhatsApp</select></label>
-<button class="b" data-a="pay" ${mine.length && e.status === 'live' && window.EE?.paymentMethods?.length ? '' : 'disabled'}>Pay ${fm(q ? q.total : 0)}</button></div>` : '<p class="mute">Organiser and admin accounts cannot book. Log out to buy as a guest.</p>'}`;
+<button class="b" data-a="pay" ${mine.length && bookingOpen(e) && window.EE?.paymentMethods?.length ? '' : 'disabled'}>${window.EE?.demoMode ? 'Complete demo booking' : 'Pay ' + fm(q ? q.total : 0)}</button></div>` : '<p class="mute">Organiser and admin accounts cannot book. Log out to buy as a guest.</p>'}`;
   refreshSteps();
   if (keep && $('#' + keep)) { const k = $('#' + keep); k.focus(); try { k.setSelectionRange(k.value.length, k.value.length) } catch { } } tick();
 }
@@ -180,6 +185,7 @@ function orderHtml(o, notes) {
   const t0 = o.tickets[0] || {};
   return `<div class="box"><div class="order-head"><div><h3>${esc(t0.eventTitle || 'Order')}</h3><p class="mute">${t0.startsAt ? fdt(t0.startsAt) + ', ' + esc(t0.venue) + '. ' : ''}Order #${esc(o.id)}, ${fm(o.total)}, ${esc(o.paymentMethod)}.</p></div><span class="st ${o.status === 'paid' ? 'ok' : 'bad'}">${esc(({paid:'Confirmed',pending_payment:'Payment pending',payment_failed:'Payment not completed',refund_pending:'Refund pending',cancelled:'Cancelled and refunded'})[o.status] || o.status)}</span></div>
 ${o.checkoutUrl ? `<p><a class="button" href="${esc(o.checkoutUrl)}">Continue secure payment</a></p>` : ''}
+${window.EE?.demoMode ? '<p class="demo-note">Demo order: no real payment was taken. These tickets are not valid for entry.</p>' : ''}
 ${o.tickets.map(t => { const v = t.status === 'valid' ? 'Valid' : t.status === 'used' ? 'Used' : t.status === 'reserved' ? 'Payment pending' : 'Void'; return `<div class="tk"><div class="tk-main"><span class="pill lt">${CN[t.tier]}</span> <span class="st ${v === 'Valid' ? 'ok' : 'bad'}">${v}</span><h4>Seat ${esc(t.seat)}</h4>
 ${v === 'Valid' ? (t.resale ? `<p>Listed for resale at ${fm(t.resale.price)} <button class="g button-sm" data-a="unlist" data-v="${t.resale.id}">Withdraw</button></p>` : `<div class="pr"><input id="t${t.id}" type="email" aria-label="Transfer to email" placeholder="Transfer to email"><button class="g" data-a="xfer" data-v="${t.id}">Transfer</button></div>${window.EE?.resaleEnabled ? `<div class="pr"><input id="r${t.id}" type="number" min="1" aria-label="Resale price" placeholder="Resale price, max ${fm(t.faceValue)}"><button class="g" data-a="resell" data-v="${t.id}">Resell</button></div>` : ''}`) : ''}</div>
 <div class="tk-qr"><div class="qr" ${t.qr ? `data-c="${esc(t.qr)}"` : ''}>${t.qr ? esc(t.qr) : ''}</div>${t.qr ? `<code>${esc(t.qr)}</code>` : ''}</div></div>` }).join('')}
