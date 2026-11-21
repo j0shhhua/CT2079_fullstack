@@ -1,5 +1,16 @@
 # Validation record
 
+## Organiser approval update — 21 November 2026
+
+- 43 automated checks passed; 0 failed: 30 account/booking workflow checks, 11 frontend checks and 2 payment adapter checks.
+- Complete suite run on Node 24.22.3, matching the deployed container's Node major version, with a temporary PostgreSQL database bound to 127.0.0.1 and a simulated email sender.
+- Added coverage for pending organiser registration/login, approval followed by email-code login, duplicate registrations, explicit customer applications with preserved history, revoked approval and sessions, disabled accounts, approval permissions, concurrent registration/login/application, email delivery failures and same-name applicant identification.
+- Existing booking, payment, refund, recovery, queue, QR and migration regressions remain passing. The new operator approval command uses the same tested approval transition as the administrator page.
+- No live accounts, live database, AWS settings, deployment, real email delivery or real payments were changed or exercised. Real SES delivery and deployment acceptance checks remain with the hosting administrator; see [Organiser registration and approval](ORGANISER-APPROVAL.md).
+- No new dependency or database schema changes are required beyond the existing security migration. Deploy the backend and frontend together.
+
+## Previous security release
+
 Date: 16 November 2026 (Singapore).
 
 - 22 local functional/regression checks passed; 0 failed.

@@ -24,7 +24,7 @@ async function api(path, o = {}) {
   return d;
 }
 const toast = m => { const t = $('#t'); t.textContent = m; t.classList.add('on'); clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove('on'), 3500) };
-const fail = e => { if (e.status === 401 && S.user) { logout(true); return } toast(e.message) };
+const fail = e => { if (e.code === 'ORGANISER_APPROVAL_PENDING') return approvalPending(); if (e.status === 401 && S.user) { logout(true); return } toast(e.message) };
 const clearTimers = () => { S.timers.forEach(clearInterval); S.timers = [] };
 
 
@@ -45,9 +45,9 @@ function chrome(p) {
   $('#acct').innerHTML = u ? `<details class="menu"><summary aria-label="Account menu"><span class="avatar" aria-hidden="true">${esc(ini(u.name))}</span>${ic('chev', 16)}</summary><div class="menu-pop"><div class="menu-head"><span class="avatar lgav" aria-hidden="true">${esc(ini(u.name))}</span><div><b>${esc(u.name)}</b><small>${esc(u.role)} account</small></div></div>${ml.map(m => `<a href="#${m[0]}">${ic(m[2], 18)}${m[1]}</a>`).join('')}<button class="out" data-a="logout">${ic('out', 18)}Log out</button></div></details>` : '<a class="button-outline button-sm" href="#login">Log in</a><a class="button button-sm" href="#register">Create account</a>';
 }
 function route() {
-  clearTimers(); stopCam(); const [p, a] = (location.hash.slice(1) || 'home').split('-'), pages = { home, event: evPage, my, order, find, org, admin, gate, login, register, profile };
+  clearTimers(); stopCam(); const [p, a] = (location.hash.slice(1) || 'home').split('-'), pages = { home, event: evPage, my, order, find, org, admin, gate, login, register, profile, pending, apply: organiserApplication };
   chrome(pages[p] ? p : 'home'); const el = $('#app'); el.innerHTML = '<p class="mute">Loading...</p>';
-  Promise.resolve((pages[p] || home)(a, S.user)).catch(e => { if (e.status === 401) { S.user = null; store.del('ee_tok'); location.hash = 'login'; return } el.innerHTML = `<div class="box"><h2>Something went wrong</h2><p class="msg">${esc(e.message)}</p><button data-a="retry">Try again</button></div>` });
+  Promise.resolve((pages[p] || home)(a, S.user)).catch(e => { if (e.code === 'ORGANISER_APPROVAL_PENDING') return approvalPending(); if (e.status === 401) { S.user = null; store.del('ee_tok'); location.hash = 'login'; return } el.innerHTML = `<div class="box"><h2>Something went wrong</h2><p class="msg">${esc(e.message)}</p><button data-a="retry">Try again</button></div>` });
 }
 function need(role, u) { if (!u || (role && u.role !== role)) { $('#app').innerHTML = `<div class="box"><h2>${u ? 'Not available for your account' : 'Log in required'}</h2><p>${u ? `This page is for ${role} accounts.` : `Log in as ${role === 'admin' ? 'an administrator' : role === 'organiser' ? 'an organiser' : 'a customer'} to continue.`}</p>${u ? '' : '<p><a href="#login">Log in</a></p>'}</div>`; return true } }
 
@@ -61,11 +61,19 @@ function login() {
 }
 function register(a) {
   const og = a === 'organiser';
-  $('#app').innerHTML = `<div class="auth-card"><form data-form="register"><h1>${og ? 'Create an organiser account' : 'Create your account'}</h1><p class="mute">${og ? 'Sell tickets for your own events. An administrator approves new organisers before they can publish events. ' : ''}Earn loyalty points, share a referral code and get SMS or WhatsApp alerts. Guests can still buy without an account.</p><label>Name<input name="name" required autocomplete="name"></label><label>Email<input name="email" type="email" required autocomplete="email"></label><label>Phone (for SMS or WhatsApp alerts)<input name="phone" type="tel" autocomplete="tel" inputmode="tel" pattern="\+?[0-9 ()\-]{8,20}" title="Phone number, for example +65 9123 4567" placeholder="+65 9123 4567"></label>
+  $('#app').innerHTML = `<div class="auth-card"><form data-form="register"><h1>${og ? 'Create an organiser account' : 'Create your account'}</h1><p class="mute">${og ? 'Sell tickets for your own events. An administrator must approve your account before you can log in as an organiser. After approval, login requires a verification code sent to your email. ' : ''}Earn loyalty points, share a referral code and get SMS or WhatsApp alerts. Guests can still buy without an account.</p>${og ? `<p class="note">Already have a customer account? ${S.user?.role === 'customer' ? '<a href="#apply">Request organiser access</a>' : '<a href="#login">Log in</a> and request organiser access from Profile and settings'} using your existing account. You do not need to register the same email again.</p>` : ''}<label>Name<input name="name" required autocomplete="name"></label><label>Email<input name="email" type="email" required autocomplete="email"></label><label>Phone (for SMS or WhatsApp alerts)<input name="phone" type="tel" autocomplete="tel" inputmode="tel" pattern="\+?[0-9 ()\-]{8,20}" title="Phone number, for example +65 9123 4567" placeholder="+65 9123 4567"></label>
 <label>Password (8+ characters)<input name="password" type="password" minlength="8" required autocomplete="new-password"></label><label>I am a<select name="role"><option value="customer" ${og ? '' : 'selected'}>Customer</option><option value="organiser" ${og ? 'selected' : ''}>Event organiser (needs admin approval)</option></select></label>
 <div id="err" role="alert"></div><button class="b">Create account</button><div class="auth-links"><span class="mute">Already have an account? <a href="#login">Log in</a></span></div></form></div>`;
 }
-async function authDone(r) { S.user = r.user; toast('Welcome, ' + r.user.name); location.hash = r.user.role === 'organiser' ? 'org' : r.user.role === 'admin' ? 'admin' : 'home'; route() }
+function pending() {
+  $('#app').innerHTML = `<section class="auth-card" aria-labelledby="approval-title"><span class="eyebrow">Organiser account</span><h1 id="approval-title">Approval pending</h1><p>Your organiser account is waiting for administrator approval. You cannot access organiser tools yet.</p><p>Once approved, log in again. We will send a verification code to your registered email address before opening your organiser dashboard.</p><p class="mute">If you need an update, contact the project administrator.</p><div class="auth-links"><a class="button" href="#login">Return to login</a><a href="#home">Browse events</a></div></section>`;
+}
+function approvalPending() { S.user = null; S.challengeId = null; S.form = {}; store.del('ee_tok'); location.hash = 'pending'; route() }
+function organiserApplication(a, u) {
+  if (need('customer', u)) return;
+  $('#app').innerHTML = `<div class="auth-card"><form data-form="organiserRequest"><h1>Request organiser access</h1><p>This changes your customer account to an organiser account. Your existing account details and booking history are kept.</p><p>Submitting signs you out. An administrator must approve the request before you can log in again. After approval, we will send a login verification code to <b>${esc(u.email)}</b>.</p><p>Organiser accounts are for managing events. To buy tickets, use guest checkout.</p><label>Confirm your current password<input name="currentPassword" type="password" required autocomplete="current-password"></label><div id="err" role="alert"></div><button class="b">Submit organiser request</button><p><a href="#profile">Back to profile</a></p></form></div>`;
+}
+async function authDone(r) { if (r.status === 'approval_pending' || r.code === 'ORGANISER_APPROVAL_PENDING') return approvalPending(); S.user = r.user; toast('Welcome, ' + r.user.name); location.hash = r.user.role === 'organiser' ? 'org' : r.user.role === 'admin' ? 'admin' : 'home'; route() }
 async function logout(expired) { if (!expired) { try { await api('/auth/logout', {method:'POST'}) } catch (e) { toast(e.message); return } } S.user = null; S.form = {}; S.ev = null; store.del('ee_tok'); store.del('ee_ot',1); toast(expired ? 'Your session expired. Log in again.' : 'Logged out.'); location.hash = 'home'; route() }
 
 /* ---------- browse ---------- */
@@ -204,7 +212,7 @@ async function order(id) {
   $('#app').innerHTML = `${fresh ? stepsHtml(4) : ''}<h2>Your order</h2>${S.user ? '' : '<p class="mute">Keep your order number. Reopening tickets requires a code sent to the buyer email.</p>'}${orderHtml(o)}`; qrs(); S.orderId = id; if (['pending_payment','refund_pending'].includes(o.status)) S.timers.push(setInterval(() => { if (!document.hidden) route() }, 5000));
 }
 function find() { $('#app').innerHTML = `<form class="box narrow" data-form="find"><h2>Find my order</h2><p class="mute">Enter your order number and buyer email. We will send a verification code.</p><label>Order number<input name="orderId" inputmode="numeric" required></label><label>Email<input name="email" type="email" required></label><div id="err" role="alert"></div><button class="b">Send verification code</button></form>` }
-function verifyForm(challengeId, login = false) { S.challengeId = challengeId; $('#app').innerHTML = `<form class="box narrow" data-form="${login ? 'verifyLogin' : 'verifyOrder'}"><h2>Check your email</h2><p>If the details match, a code has been sent. It expires in 10 minutes.</p><label>Verification code<input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label><div id="err" role="alert"></div><button class="b">Verify</button></form>` }
+function verifyForm(challengeId, login = false) { S.challengeId = challengeId; if (login) { S.user = null; chrome('login') } $('#app').innerHTML = `<form class="box narrow" data-form="${login ? 'verifyLogin' : 'verifyOrder'}"><h2>Check your email</h2><p>If the details match, a code has been sent. It expires in 10 minutes.</p><label>Verification code<input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label><div id="err" role="alert"></div><button class="b">Verify</button></form>` }
 async function purchaseResult(r) {
   if (r.checkoutUrl) { const u = new URL(r.checkoutUrl); if (u.protocol !== 'https:' || u.hostname !== 'checkout.stripe.com') throw new Error('Invalid payment destination'); location.assign(u.href); return }
   S.form = {}; toast(r.order.status === 'paid' ? 'Payment successful. Your tickets are ready.' : 'Your order is being processed. Check its status shortly.');
@@ -241,7 +249,7 @@ async function admin(a, u) {
   const st = (n, v, s, i) => `<div class="stat-card"><span>${n}</span><span class="si">${ic(i, 18)}</span><strong>${v}</strong><small>${s}</small></div>`;
   $('#app').innerHTML = `<div class="dash-head"><div><span class="adm-pill">Admin</span><span class="mute">${new Date().toLocaleDateString('en-SG', { timeZone: 'Asia/Singapore', weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' })}</span><h1>Platform overview</h1></div></div><div class="stats-grid">${st('Live events', sm.live_events, 'on sale', 'cal')}${st('Awaiting approval', sm.pending_events, 'events', 'list')}${st('Orders', sm.orders, 'paid', 'ticket')}${st('Booked', fm(sm.booked), 'total value', 'chart')}${st('Fraud flags', sm.open_flags, 'open', 'warn')}${st('Pending payments', sm.pending_payments || 0, 'pending or retrying', 'clock')}</div>
 <div class="box"><h3>Event approvals <span class="status-badge status-pending">${evs.filter(e => e.status === 'pending').length} waiting</span></h3>${evs.filter(e => e.status === 'pending').map(e => `<div class="manage-item"><div><b>${esc(e.title)}</b><br><span class="mute">${fdt(e.startsAt)} &middot; ${esc(e.venue)}, ${esc(e.location)} &middot; ${e.rows * e.cols} seats from ${fm(e.prices.con)}</span></div><button class="b button-sm" data-a="evSt" data-v="${e.id}|live">Publish</button><button class="button-sm" data-a="evSt" data-v="${e.id}|rejected">Reject</button></div>`).join('') || '<p class="mute">No events are waiting for approval.</p>'}</div>
-<div class="box"><h3>Organiser approvals</h3>${orgs.map(o => `<div class="manage-item"><div><b>${esc(o.name)}</b></div><span class="status-badge ${o.organiser_approved ? 'status-live' : 'status-pending'}">${o.organiser_approved ? 'Approved' : 'Pending'}</span>${o.organiser_approved ? '' : `<button class="b button-sm" data-a="apO" data-v="${o.id}">Approve</button>`}</div>`).join('') || '<p class="mute">No organisers.</p>'}</div>
+<div class="box"><h3>Organiser approvals</h3>${orgs.map(o => `<div class="manage-item"><div><b>${esc(o.name)}</b><br><span class="mute">${esc(o.email)}</span></div><span class="status-badge ${o.organiser_approved ? 'status-live' : 'status-pending'}">${o.organiser_approved ? 'Approved' : 'Pending'}</span>${o.organiser_approved ? '' : `<button class="b button-sm" data-a="apO" data-v="${o.id}">Approve</button>`}</div>`).join('') || '<p class="mute">No organisers.</p>'}</div>
 <div class="box"><h3>All events</h3>${evs.filter(e => e.status !== 'pending').map(e => `<div class="manage-item"><div><b>${esc(e.title)}</b><br><span class="mute">${fdt(e.startsAt)}</span></div><span class="status-badge status-${esc(e.status)}">${esc(e.status)}</span>${e.status === 'pending' ? `<button class="b button-sm" data-a="evSt" data-v="${e.id}|live">Publish</button><button class="button-sm" data-a="evSt" data-v="${e.id}|rejected">Reject</button>` : ''}${e.status === 'live' ? `<button class="button-sm" data-a="hot" data-v="${e.id}|${e.highDemand ? 0 : 1}">${e.highDemand ? 'Waiting room on' : 'Waiting room off'}</button>` : ''}</div>`).join('')}</div>
 <div class="box"><h3>Fraud monitor</h3>${fr.map(f => `<div class="manage-item"><div><b>${esc(f.kind)}</b><br><span class="mute">${esc(f.detail || '')} ${fdt(f.created_at)}</span></div><button class="button-sm" data-a="clr" data-v="${f.id}">Dismiss</button></div>`).join('') || '<p class="mute">No open flags. Rules: more than 6 seats in one order, 3 orders in 10 minutes, forged QR scans.</p>'}</div>
 <div class="box"><h3>Payments and refunds</h3>${jobs.length ? jobs.map(j => `<p>Order #${esc(j.order_id)} &middot; ${esc(j.kind)} &middot; ${esc(j.last_error || 'Processing')} <small>${esc(j.id)}</small></p>`).join('') : '<p class="mute">No pending payments or refunds.</p>'}</div>
@@ -254,7 +262,7 @@ function profile(a, u) {
 <div class="two"><div><form class="box" data-form="profile"><h3>Your details</h3><div class="f"><label>Name<input name="name" required autocomplete="name" value="${esc(u.name)}"></label><label>Email (cannot be changed)<input value="${esc(u.email)}" disabled></label><label>Phone (for SMS or WhatsApp alerts)<input name="phone" type="tel" autocomplete="tel" ${PH} value="${esc(u.phone || '')}"></label></div><div data-err role="alert"></div><p><button class="b">Save changes</button></p></form>
 <form class="box" data-form="password"><h3>Change password</h3><div class="f"><label>Current password<input name="currentPassword" type="password" required autocomplete="current-password"></label><label>New password (8+ characters)<input name="newPassword" type="password" minlength="8" required autocomplete="new-password"></label></div><div data-err role="alert"></div><p><button class="b">Update password</button></p></form></div>
 <aside><div class="box side-card"><div class="prof"><span class="avatar lgav" aria-hidden="true">${esc(ini(u.name))}</span><div><b>${esc(u.name)}</b><small style="text-transform:capitalize">${esc(u.role)} account</small></div></div></div>
-<div class="box"><h3>Loyalty and referrals</h3><p><b>${u.points || 0}</b> points.</p><p class="mute">Your referral code <b>${esc(u.referral_code || '')}</b> gives friends 5% off. A qualifying verified first purchase of S$10 or more earns you 50 points after the event.</p></div><p><a class="back-link" href="#my">&lsaquo; Back to My tickets</a></p></aside></div>`;
+<div class="box"><h3>Loyalty and referrals</h3><p><b>${u.points || 0}</b> points.</p><p class="mute">Your referral code <b>${esc(u.referral_code || '')}</b> gives friends 5% off. A qualifying verified first purchase of S$10 or more earns you 50 points after the event.</p></div>${u.role === 'customer' ? '<div class="box"><h3>Organise events</h3><p>Apply with your existing account. Administrator approval is required.</p><a class="button" href="#apply">Request organiser access</a></div>' : ''}<p><a class="back-link" href="#my">&lsaquo; Back to My tickets</a></p></aside></div>`;
 }
 let CAM = null;
 function stopCam() { if (CAM) { CAM.stop = true; if (CAM.stream) CAM.stream.getTracks().forEach(t => t.stop()); CAM = null } const c = document.getElementById('cam'); if (c) c.hidden = true }
@@ -301,6 +309,7 @@ document.addEventListener('submit', async e => {
   try {
     if (name === 'login') { const r = await api('/auth/login', { method:'POST', body:d }); if (r.challengeId) verifyForm(r.challengeId,true); else await authDone(r) }
     else if (name === 'register') { const r = await api('/auth/register',{method:'POST',body:d}); if (r.challengeId) verifyForm(r.challengeId,true); else await authDone(r) }
+    else if (name === 'organiserRequest') { await authDone(await api('/me/organiser-request', {method:'POST',body:{currentPassword:d.currentPassword}})) }
     else if (name === 'find') { const r = await api('/orders/lookup', {method:'POST',body:d}); verifyForm(r.challengeId) }
     else if (name === 'verifyOrder') { const r = await api('/orders/verify', {method:'POST',body:{challengeId:S.challengeId,code:d.code}}); S.challengeId = null; location.hash = 'order-' + r.orderId }
     else if (name === 'verifyLogin') { await authDone(await api('/auth/verify', {method:'POST',body:{challengeId:S.challengeId,code:d.code}})); S.challengeId = null }
@@ -310,7 +319,16 @@ document.addEventListener('submit', async e => {
     else if (name === 'password') { await api('/me', { method: 'PUT', body: { name: S.user.name, phone: S.user.phone || '', currentPassword: d.currentPassword, newPassword: d.newPassword } }); form.reset(); S.user = null; location.hash = 'login'; toast('Password updated. Log in again.') }
     else if (name === 'editev') { const b = { ...d }; delete b.id; b.startsAt = new Date(d.startsAt).toISOString(); await api('/organiser/events/' + form.dataset.id, { method: 'PUT', body: b }); toast('Event updated.'); reload() }
     else if (name === 'scan') { await scanCode(d.code) }
-  } catch (x) { if (err) err.innerHTML = `<p class="msg">${esc(x.message)}</p>`; else fail(x) } finally { if (btn) btn.disabled = false }
+  } catch (x) {
+    if (x.code === 'ORGANISER_APPROVAL_PENDING') approvalPending();
+    else {
+      if (name === 'login' || name === 'verifyLogin') {
+        try { S.user = (await api('/session')).user } catch { S.user = null }
+        chrome('login');
+      }
+      if (err) err.innerHTML = `<p class="msg">${esc(x.message)}</p>`; else fail(x);
+    }
+  } finally { if (btn) btn.disabled = false }
 });
 addEventListener('hashchange', route);
 document.addEventListener('click', e => { const m = document.querySelector('.menu[open]'); if (m && (!m.contains(e.target) || e.target.closest('a,[data-a]'))) m.removeAttribute('open') });

@@ -11,9 +11,9 @@ function browserSecurity({ pool, env, bad, wrap, mailRecovery }) {
   if (parsed.origin !== origin || (secure && parsed.protocol !== 'https:')) throw new Error('APP_ORIGIN must be an exact HTTPS origin in production');
   const options = { httpOnly: true, secure, sameSite: 'strict', path: '/api', maxAge: 2 * 3600000 };
   const clearOptions = { httpOnly: true, secure, sameSite: 'strict', path: '/api' };
-  async function issue(res, kind, id) {
+  async function issue(res, kind, id, cl = pool) {
     const token = crypto.randomBytes(32).toString('base64url');
-    await pool.query(`insert into browser_sessions(token_hash,kind,user_id,order_id,fresh_until,expires_at)
+    await cl.query(`insert into browser_sessions(token_hash,kind,user_id,order_id,fresh_until,expires_at)
       values($1,$2,$3,$4,now()+interval '15 minutes',now()+interval '2 hours')`,
     [hash(token), kind, kind === 'account' ? id : null, kind === 'order' ? id : null]);
     res.cookie(kind === 'account' ? 'ee_session' : 'ee_order_' + id, token, options);
@@ -25,7 +25,14 @@ function browserSecurity({ pool, env, bad, wrap, mailRecovery }) {
   }
   const auth = wrap(async (req, res, next) => {
     const s = await read(req, 'ee_session');
-    if (s && s.kind === 'account') { req.session = s; req.user = (await pool.query('select * from users where id=$1 and not disabled', [s.user_id])).rows[0]; }
+    if (s && s.kind === 'account') {
+      const user = (await pool.query('select * from users where id=$1 and not disabled', [s.user_id])).rows[0];
+      if (user && (user.role !== 'organiser' || user.organiser_approved)) { req.session = s; req.user = user; }
+      else {
+        await pool.query('delete from browser_sessions where token_hash=$1', [s.token_hash]);
+        res.clearCookie('ee_session', clearOptions);
+      }
+    }
     const g = req.headers['x-guest-token'];
     req.holder = req.user ? req.user.id : typeof g === 'string' && /^[a-f0-9]{24,64}$/.test(g) ? 'g:' + g : null;
     next();
@@ -46,7 +53,7 @@ function browserSecurity({ pool, env, bad, wrap, mailRecovery }) {
   }
   const sensitiveLimits = wrap(async (req, res, next) => {
     let group, max;
-    if (/^\/auth\/(login|register|verify)$|^\/orders\/(lookup|verify)$/.test(req.path)) { group = 'identity'; max = 20; }
+    if (/^\/auth\/(login|register|verify)$|^\/orders\/(lookup|verify)$|^\/me\/organiser-request$/.test(req.path)) { group = 'identity'; max = 20; }
     else if (/holds$|queue\/join$/.test(req.path)) { group = 'reservations'; max = 60; }
     else if (/checkout$|\/buy$|\/cancel$|\/transfer$|\/resale$/.test(req.path) && req.method !== 'GET') { group = 'commerce'; max = 30; }
     else if (req.path === '/gate/scan') { group = 'gate'; max = 300; }
@@ -69,12 +76,24 @@ function browserSecurity({ pool, env, bad, wrap, mailRecovery }) {
     if (manage && new Date(session.fresh_until) <= new Date()) bad(403, 'Verify your email with Find my order, or log in again before changing tickets.', 'REAUTH_REQUIRED');
     return o;
   }
+  function pendingApproval(res, status = 202) {
+    res.clearCookie('ee_session', clearOptions);
+    return res.status(status).json({ status: 'approval_pending', code: 'ORGANISER_APPROVAL_PENDING',
+      message: 'Your organiser account is awaiting administrator approval. Once approved, log in again to receive a verification code at your registered email address.' });
+  }
   async function staffChallenge(res, user) {
+    if (user.role === 'organiser' && !user.organiser_approved) return pendingApproval(res);
+    res.clearCookie('ee_session', clearOptions);
     if (!mailRecovery) bad(503, 'Staff email verification is not configured');
     const id = crypto.randomUUID(), code = String(crypto.randomInt(0,1000000)).padStart(6,'0');
     const digest = crypto.createHmac('sha256',env.JWT_SECRET).update(id + ':' + code).digest('hex');
     await pool.query(`insert into recovery_challenges(id,user_id,code_hash,expires_at) values($1,$2,$3,now()+interval '10 minutes')`, [id,user.id,digest]);
-    await mailRecovery(user.email,code);
+    try { await mailRecovery(user.email,code); }
+    catch {
+      await pool.query('update recovery_challenges set consumed_at=now() where id=$1', [id]);
+      console.error('Staff verification email delivery failed');
+      bad(503, 'We could not send your verification email. Please try again later or contact the administrator.');
+    }
     res.status(202).json({challengeId:id});
   }
   function routes(app) {
@@ -120,21 +139,26 @@ function browserSecurity({ pool, env, bad, wrap, mailRecovery }) {
       const cl = await pool.connect(); let user;
       try {
         await cl.query('begin');
+        // Lock the account before its challenge, matching password changes and organiser requests.
+        const target = (await cl.query('select user_id from recovery_challenges where id=$1', [challengeId])).rows[0];
+        const account = target?.user_id ? (await cl.query('select * from users where id=$1 for update', [target.user_id])).rows[0] : null;
         const c = (await cl.query('select * from recovery_challenges where id=$1 for update',[challengeId])).rows[0];
         if (c?.user_id && !c.consumed_at && c.attempts<5 && new Date(c.expires_at)>new Date()) {
           await cl.query('update recovery_challenges set attempts=attempts+1 where id=$1',[challengeId]);
           const digest = crypto.createHmac('sha256',env.JWT_SECRET).update(challengeId + ':' + code).digest('hex');
           if (crypto.timingSafeEqual(Buffer.from(c.code_hash),Buffer.from(digest))) {
-            user = (await cl.query('select * from users where id=$1 and not disabled',[c.user_id])).rows[0];
+            if (account && !account.disabled && ['admin', 'organiser'].includes(account.role)) user = account;
             await cl.query('update recovery_challenges set consumed_at=now() where id=$1',[challengeId]);
           }
         }
+        if (user && (user.role !== 'organiser' || user.organiser_approved)) await issue(res, 'account', user.id, cl);
         await cl.query('commit');
       } catch(e) { await cl.query('rollback'); throw e; } finally { cl.release(); }
       if (!user) bad(400,'Invalid or expired verification code');
-      await issue(res,'account',user.id); res.json({user:publicUser(user)});
+      if (user.role === 'organiser' && !user.organiser_approved) return pendingApproval(res);
+      res.json({user:publicUser(user)});
     }));
   }
-  return { auth, boundary, sensitiveLimits, issue, orderFor, routes, publicUser, options, clearOptions, staffChallenge };
+  return { auth, boundary, sensitiveLimits, issue, orderFor, routes, publicUser, options, clearOptions, staffChallenge, pendingApproval };
 }
 module.exports = { browserSecurity, hash, publicUser };

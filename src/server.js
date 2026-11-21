@@ -4,6 +4,7 @@ const path = require('path'), express = require('express'), helmet = require('he
 const { Pool } = require('pg'), bcrypt = require('bcryptjs'), crypto = require('crypto');
 const { databaseConfig } = require('./db-config');
 const { browserSecurity } = require('./browser-security');
+const { approveOrganiser } = require('./organiser-approval');
 const { paymentProvider } = require('./payment-provider');
 const { commerce } = require('./commerce');
 function createApp(overrides = {}) {
@@ -157,23 +158,52 @@ app.get('/health', wrap(async (req, res) => { await q('select 1'); res.json({ ok
 
 // Accounts
 app.post('/api/auth/register', strict, wrap(async (req, res) => {
-  const { name, email, password, phone, role } = req.body || {};
-  if (!name || !EMAIL.test(email || '') || (password || '').length < 8) bad(400, 'Name, valid email and a password of 8+ characters are required');
-  if ((await q('select 1 from users where lower(email)=lower($1)', [email])).rowCount) bad(409, 'That email is already registered');
+  const { name, password, phone, role } = req.body || {}, email = String(req.body?.email || '').trim().toLowerCase();
+  if (!name?.trim() || !EMAIL.test(email) || (password || '').length < 8) bad(400, 'Name, valid email and a password of 8+ characters are required');
+  if (role !== undefined && !['customer', 'organiser'].includes(role)) bad(400, 'Choose a customer or organiser account');
+  const alreadyRegistered = () => bad(409, role === 'organiser'
+    ? 'That email is already registered. Log in, then request organiser access from Profile and settings.'
+    : 'That email is already registered', 'EMAIL_ALREADY_REGISTERED');
+  if ((await q('select 1 from users where lower(email)=lower($1)', [email])).rowCount) alreadyRegistered();
   if (phone && !phoneOk(phone)) bad(400, phoneBad);
   const r = role === 'organiser' ? 'organiser' : 'customer';
-  const u = (await q(`insert into users(name,email,phone,password_hash,role,referral_code) values($1,$2,$3,$4,$5,$6) returning id,name,email,role,organiser_approved,points,referral_code`,
-    [name.trim(), email.trim(), phone ? phoneClean(phone) : null, await bcrypt.hash(password, 10), r, 'REF-' + crypto.randomBytes(3).toString('hex').toUpperCase()])).rows[0];
-  if (u.role === 'organiser') return security.staffChallenge(res,u);
-  await security.issue(res, 'account', u.id); res.status(201).json({ user: security.publicUser(u) });
+  const passwordHash = await bcrypt.hash(password, 10);
+  let u;
+  try {
+    u = await tx(async cl => {
+      const account = (await cl.query(`insert into users(name,email,phone,password_hash,role,referral_code) values($1,$2,$3,$4,$5,$6) returning id,name,email,role,organiser_approved,points,referral_code`,
+        [name.trim(), email, phone ? phoneClean(phone) : null, passwordHash, r, 'REF-' + crypto.randomBytes(3).toString('hex').toUpperCase()])).rows[0];
+      if (account.role === 'customer') await security.issue(res, 'account', account.id, cl);
+      return account;
+    });
+  } catch (e) { if (e.code === '23505' && e.constraint === 'users_email_uq') alreadyRegistered(); throw e; }
+  if (u.role === 'organiser') return security.pendingApproval(res, 201);
+  res.status(201).json({ user: security.publicUser(u) });
 }));
 app.post('/api/auth/login', strict, wrap(async (req, res) => {
-  const u = (await q('select * from users where lower(email)=lower($1)', [(req.body || {}).email || ''])).rows[0];
-  if (!u || u.disabled || !(await bcrypt.compare((req.body || {}).password || '', u.password_hash))) bad(401, 'Email or password is incorrect');
+  // Keep the role decision and customer session together if an organiser request races this login.
+  const u = await tx(async cl => {
+    const account = (await cl.query('select * from users where lower(email)=lower($1) for update', [String(req.body?.email || '').trim()])).rows[0];
+    if (!account || account.disabled || !(await bcrypt.compare(req.body?.password || '', account.password_hash))) bad(401, 'Email or password is incorrect');
+    if (account.role === 'customer') await security.issue(res, 'account', account.id, cl);
+    return account;
+  });
+  if (u.role === 'organiser' && !u.organiser_approved) return security.pendingApproval(res);
   if (['admin','organiser'].includes(u.role)) return security.staffChallenge(res,u);
-  await security.issue(res, 'account', u.id); res.json({ user: security.publicUser(u) });
+  res.json({ user: security.publicUser(u) });
 }));
 app.get('/api/me', need('customer', 'organiser', 'admin'), (req, res) => res.json(security.publicUser(req.user)));
+app.post('/api/me/organiser-request', need('customer'), strict, wrap(async (req, res) => {
+  await tx(async cl => {
+    const u = (await cl.query('select * from users where id=$1 for update', [req.user.id])).rows[0];
+    if (!u || u.disabled || u.role !== 'customer') bad(409, 'Your account has changed. Log in again to check its status.');
+    if (!(await bcrypt.compare(req.body?.currentPassword || '', u.password_hash))) bad(400, 'Current password is incorrect');
+    await cl.query("update users set role='organiser',organiser_approved=false where id=$1", [u.id]);
+    await cl.query('delete from browser_sessions where user_id=$1', [u.id]);
+    await cl.query('update recovery_challenges set consumed_at=now() where user_id=$1 and consumed_at is null', [u.id]);
+  });
+  return security.pendingApproval(res);
+}));
 app.put('/api/me', need('customer', 'organiser', 'admin'), strict, wrap(async (req, res) => {
   const b = req.body || {}, name = String(b.name || '').trim();
   if (!name) bad(400, 'Name is required');
@@ -350,7 +380,10 @@ app.get('/api/admin/summary', need('admin'), wrap(async (req, res) => {
     (select count(*) from fraud_flags where not resolved)::int open_flags,(select count(*) from payment_jobs where status='pending')::int pending_payments`)).rows[0]; res.json({ ...r, booked: +r.booked });
 }));
 app.get('/api/admin/organisers', need('admin'), wrap(async (req, res) => res.json((await q(`select id,name,email,organiser_approved from users where role='organiser' order by organiser_approved, created_at desc`)).rows)));
-app.post('/api/admin/organisers/:id/approve', need('admin'), wrap(async (req, res) => { await q(`update users set organiser_approved=true where id=$1 and role='organiser'`, [req.params.id]); res.json({ ok: true }); }));
+app.post('/api/admin/organisers/:id/approve', need('admin'), wrap(async (req, res) => {
+  await approveOrganiser(pool, { id: req.params.id });
+  res.json({ ok: true });
+}));
 app.get('/api/admin/events', need('admin'), wrap(async (req, res) => res.json((await q(`select * from events where ($1::text is null or status=$1) order by (status='pending') desc, id desc`, [req.query.status || null])).rows.map(pub))));
 app.patch('/api/admin/events/:id', need('admin'), wrap(async (req, res) => {
   const { status, highDemand } = req.body || {};

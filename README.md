@@ -23,6 +23,8 @@ Application and deployment hardening only. No SQL injection work, attack payload
 
 ## Run locally
 
+For organiser registration, pending approval, email-code login and the hosting administrator's approval steps, read [Organiser registration and approval](ORGANISER-APPROVAL.md).
+
 Use Node 24 (container runtime is pinned) and PostgreSQL 15 or later. The application tests were run with Node 20.19.5 and disposable PostgreSQL 18.6; the container was not built on this computer because Docker is unavailable.
 
 1. Run `npm ci --ignore-scripts`.
